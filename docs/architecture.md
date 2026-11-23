@@ -1,6 +1,6 @@
 # Flow: Microsoft 365 Copilot / Copilot Cowork → Azure AI Gateway → MCP server (as the user)
 
-The user signs in once in Copilot. Every tool call then reaches the MCP backend with a token
+The user signs in to create a connection in Copilot. Every tool call then reaches the MCP backend with a token
 that carries **the user's identity** but was issued **for the backend** and requested **by the
 gateway's token exchange app**. No secrets sit in the gateway: it authenticates as the token
 exchange app with its user-assigned managed identity (workload identity federation).
@@ -42,6 +42,7 @@ required configuration: the gateway's first-party app must be pre-authorized for
 | App A delegated `Data.All` + admin consent | Users get consent prompts, or a "needs admin approval" block, in Copilot. |
 | App D (separate client for Copilot Studio) | Copilot Studio has no client to sign users in with: it can't use Entra SSO, and Entra doesn't support Dynamic Client Registration. |
 | App D admin consent | The AI Gateway is Microsoft's app, so App D can't be pre-authorized on it. Without consent, users get a consent prompt or are blocked. |
+| Explicit `offline_access` in the Copilot Studio tool's OAuth scopes | Entra's v2 endpoint doesn't issue a refresh token, so the connection can't renew its access token without reauthorization. Admin consent alone doesn't request this scope. |
 | App D redirect URI from Copilot Studio (Web platform) | Sign-in fails with `AADSTS50011`. Every MCP tool has its own redirect URL. |
 | Runtime role **AI Gateway Tools User** | Gateway returns 403. Owner and Contributor do not grant tool invocation. |
 | Pre-authorization of `18550318-…` on App B | The gateway can't obtain T1', so OBO fails. |

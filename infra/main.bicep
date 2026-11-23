@@ -190,7 +190,7 @@ output copilotStudio object = enableCopilotStudioClient
       authorizationUrl: '${authority}/oauth2/v2.0/authorize'
       tokenUrlTemplate: '${authority}/oauth2/v2.0/token'
       refreshUrl: '${authority}/oauth2/v2.0/token'
-      scopes: 'https://ai.gateway.azure.com/Data.All offline_access openid profile'
+      scopes: 'https://ai.gateway.azure.com/Data.All offline_access'
       redirectUris: copilotStudioRedirectUris
     }
   : {}
