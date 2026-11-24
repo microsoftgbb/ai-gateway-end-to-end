@@ -4,7 +4,8 @@ Bicep that provisions, end to end, in one `az deployment sub create`:
 
 - **Microsoft Entra ID** ([Microsoft Graph Bicep extension](https://learn.microsoft.com/graph/templates/bicep/overview-bicep-templates-for-graph)):
   the MCP backend API, the gateway's *token exchange* app with a secretless federated credential,
-  the Copilot connector client app, pre-authorization, and tenant-wide admin consent.
+  the Copilot connector client app, the Copilot Studio client app, pre-authorization, and
+  tenant-wide admin consent.
 - **Azure Container Apps**: a dummy FastMCP server protected twice by the backend app registration:
   Container Apps built-in auth (Easy Auth), then in-code JWT validation. The image is built by an ACR
   Tasks run from this repo during the deployment, so no local Docker is needed.
@@ -31,6 +32,7 @@ The full walkthrough (token-by-token table and why each piece exists) is in
 | Entra | **App A** `<prefix>-copilot-connector` | OAuth 2.0 client for the M365 Copilot federated connector: `Data.All` (AI Gateway), `openid`, `offline_access`, admin consent. Client secret: `scripts/new-copilot-secret.sh` |
 | Entra | **App B** `<prefix>-token-exchange` | Identifier URI `api://<appId>`. Exposes `FederationApp.Access` (AI Gateway app pre-authorized). Delegated `user_impersonation` on App C with admin consent. Federated credential trusting the gateway's managed identity |
 | Entra | **App C** `<prefix>-mcp-backend` | MCP backend API: `api://<appId>/user_impersonation`, v2 tokens |
+| Entra | **App D** `<prefix>-copilot-studio` | OAuth 2.0 client for a Copilot Studio agent's MCP tool: `Data.All` (AI Gateway) and `offline_access`, with tenant-wide admin consent. Redirect URIs from `copilotStudioRedirectUris`. Client secret: `scripts/new-copilot-studio-secret.sh`. Skipped when `enableCopilotStudioClient = false` |
 | Entra | AI Gateway Dataplane service principal (`18550318-…`) | Created if missing (upsert); a Bicep deployment never deletes it |
 | Azure | User-assigned managed identity, attached to the gateway | Authenticates as App B (no secret) |
 | Azure | AI Gateway + MCP server `dummy-mcp` | Backend auth: `oauth2` / `tokenExchange` / `entraOnBehalfOf` |
@@ -127,6 +129,80 @@ scripts/new-copilot-secret.sh    # adds a client secret to App A and prints it o
 Copilot connects with OAuth 2.0 rather than Entra SSO because Entra SSO would require changing the
 AI Gateway's first-party app registration, which you can't do.
 
+## Connect a Copilot Studio agent
+
+A Copilot Studio agent calls the same gateway MCP endpoint, as the signed-in user, through its own
+client app (App D). Copilot Studio can't use Entra SSO, and its **Dynamic discovery** and
+**Dynamic** OAuth options need Dynamic Client Registration, which Entra ID doesn't support. So the
+MCP tool uses **OAuth 2.0 → Manual** with App D's client ID and secret.
+
+App D doesn't do OBO. Copilot Studio uses the OAuth 2.0 authorization-code flow and stores each
+user's tokens in a per-user connection. Every tool call sends the user's `Data.All` token to the
+gateway. The gateway's OBO exchange to the backend is unchanged.
+
+Bicep creates App D and its consent. The secret and the redirect URI are separate steps:
+
+```bash
+scripts/postdeploy.sh                 # prints the values below (outputs.copilotStudio)
+scripts/new-copilot-studio-secret.sh  # adds a client secret to App D and prints it once
+```
+
+1. **Power Platform environment**: Copilot Studio needs one with Dataverse. A **Developer**
+   environment in the same geography as the gateway is enough for testing.
+2. **Copilot Studio** → your agent → **Tools → Add a tool → Model Context Protocol**:
+
+   | Field | Value |
+   | --- | --- |
+   | Server name / description | Describe the tools; the orchestrator uses this to pick the server |
+   | Server URL | `serverUrl`, the gateway MCP endpoint |
+   | Authentication | **OAuth 2.0 → Manual** |
+   | Client ID / Client secret | `clientId` / output of `scripts/new-copilot-studio-secret.sh` |
+   | Authorization URL | `authorizationUrl` |
+   | Token URL template and Refresh URL | `tokenUrlTemplate` / `refreshUrl` |
+   | Scopes | `https://ai.gateway.azure.com/Data.All offline_access` |
+
+   Entra's v2 endpoint requires `offline_access` to be explicitly requested to issue a refresh
+   token. Listing or admin-consenting it on App D alone isn't enough. Configure the
+   [Manual OAuth token and refresh endpoints](https://learn.microsoft.com/en-us/microsoft-copilot-studio/mcp-add-existing-server-to-agent#manual)
+   as shown above.
+
+   Bicep grants tenant-wide consent to App D's configured delegated permissions so users don't
+   depend on individual consent. `offline_access` doesn't inherently require admin consent,
+   but tenant consent policies can prevent users from consenting. See
+   [Entra's scope documentation](https://learn.microsoft.com/en-us/entra/identity-platform/scopes-oidc#the-offline_access-scope).
+   After changing scopes, reconnect to obtain fresh tokens. Refresh tokens don't bypass
+   Conditional Access sign-in frequency or token revocation.
+
+   Save, then copy the generated **Redirect URL**
+   (`https://global.consent.azure-apim.net/redirect/…`). Each MCP tool gets its own.
+3. **Register the redirect URL on App D**: add it to `copilotStudioRedirectUris` in
+   `infra/main.bicepparam` and redeploy. Don't add it in the portal: the next deployment replaces
+   App D's redirect URIs with the parameter's list.
+4. **Create the connection**: on the tool, select **Create connection** and sign in. Set the tool's
+   **Authentication** to **End user account**, not maker-provided credentials. Otherwise every
+   user calls the backend as the maker.
+5. **Grant users runtime access**, as for Copilot: add them to `runtimeAccessPrincipalIds`.
+6. Test the agent with something like *"Who am I?"*. `dummy_whoami` returns the signed-in user. The
+   gateway's telemetry shows App D's client ID as `azp`, so you can tell Copilot Studio calls apart
+   from the Copilot connector.
+
+To call your own Entra-protected MCP server directly, without the gateway, use the same App D
+pattern, requesting the server's delegated scope plus `offline_access`:
+
+```text
+api://<App-C-client-ID>/user_impersonation offline_access
+```
+
+Use the server's actual Application ID URI if it differs from `api://<App-C-client-ID>`.
+Configure App D's delegated API permission and grant tenant-wide admin consent, or pre-authorize
+App D on your own API. This deployment configures App D for the gateway, not direct App C access.
+
+To call this deployment's App C directly, also allow App D in both Easy Auth's
+`allowedApplications` and the backend's `ALLOWED_CLIENT_IDS` configuration in
+[`infra/modules/mcp-server.bicep`](infra/modules/mcp-server.bicep). Both currently allow only App B,
+so changing scopes and consent alone won't enable direct calls. Direct calls bypass the gateway's
+runtime RBAC and other gateway controls.
+
 ## Optional: GitHub Copilot in VS Code
 
 `scripts/postdeploy.sh` writes `.vscode/mcp.json` for the gateway endpoint. The gateway doesn't publish
@@ -192,20 +268,27 @@ The token is valid for roughly 60–90 minutes.
 | 400 / `-32602` *"Required MCP request metadata is missing"* | Only `2026-07-28` is enabled. Keep the `2025-*` versions. |
 | Copilot: *"Selected user account does not exist in tenant"* | Signed in to a different tenant than the gateway and the apps. |
 | Copilot: sign-in fails with zero requests at the gateway | The Teams Developer Portal registration is in another tenant, or its Base URL doesn't exactly match the connector's. |
+| Copilot Studio: **Dynamic** or **Dynamic discovery** OAuth fails | Entra ID doesn't support Dynamic Client Registration. Use **OAuth 2.0 → Manual** with App D. |
+| Copilot Studio: `AADSTS50011` redirect URI mismatch | The tool's Redirect URL isn't in `copilotStudioRedirectUris`. Each new MCP tool generates a new URL: add it and redeploy. |
+| Copilot Studio: users need to sign in again after a while | Check that the tool explicitly requests `offline_access` and its Refresh URL is the Entra v2 token endpoint. Reconnect after scope changes. If renewal still fails, inspect Entra sign-in logs for refresh-token errors, Conditional Access, token revocation, or an expired App D secret; missing scopes aren't the only cause. |
+| Copilot Studio: everyone appears as the same user | The tool uses maker-provided credentials. Set **Authentication** to **End user account**. |
+| Any client: HTTP 502 `{"error":"Failed to resolve route"}` for every path, even toolservers that don't exist, and nothing in gateway telemetry | The regional front end (`*.<region>-01.ai.gateway.azure.com`) can't route to the gateway. It's a platform-side problem: retry later or open a support case. To keep testing, deploy to another region. |
 | Deployment: *"Another object with the same value for property uniqueName already exists"* | An app was deleted outside Bicep and is still in the directory's deleted items. Permanently delete it (`scripts/cleanup.sh` does) or change `namePrefix`. |
 | Deployment: `PrincipalNotFound` on a role assignment | Directory replication delay for a just-created principal. Rerun the deployment. |
 
 ## Clean up
 
 ```bash
-scripts/cleanup.sh   # deletes the resource group and permanently deletes App A, B and C
+scripts/cleanup.sh   # deletes the resource group and permanently deletes App A, B, C and D
 ```
 
-Then delete the Teams Developer Portal OAuth registration and the M365 connector by hand. The AI
-Gateway Dataplane service principal is intentionally left in the tenant.
+Then delete the Teams Developer Portal OAuth registration, the M365 connector, and the Copilot
+Studio MCP tool by hand. The AI Gateway Dataplane service principal is intentionally left in the
+tenant.
 
 > To rotate the Copilot connector secret, run `scripts/new-copilot-secret.sh` again, update the Teams
-> Developer Portal registration, then remove the old secret from App A.
+> Developer Portal registration, then remove the old secret from App A. For Copilot Studio, run
+> `scripts/new-copilot-studio-secret.sh`, update the MCP tool, then remove the old secret from App D.
 
 ## Layout
 
@@ -214,12 +297,13 @@ infra/                              Bicep (subscription scope)
   main.bicep                        Resource group, modules, outputs
   main.bicepparam                   Parameters
   bicepconfig.json                  Microsoft Graph Bicep extension (v1.0:1.0.0)
-  modules/entra.bicep               App A, B, C, service principals, federated credential, consent (Graph)
+  modules/entra.bicep               App A, B, C, D, service principals, federated credential, consent (Graph)
   modules/app-identifier-uri.bicep  Sets api://{appId} on App B and App C (Graph)
   modules/identities.bicep          Gateway and Container App managed identities
   modules/mcp-server.bicep          ACR + taskRun build, Container Apps environment + app, Easy Auth
   modules/ai-gateway.bicep          AI Gateway, MCP server (OBO backend), runtime role assignment
 mcp-server/                         FastMCP server (whoami, echo, get_server_time) + Dockerfile
-scripts/                            postdeploy.sh, new-copilot-secret.sh, test-obo.py, cleanup.sh
+scripts/                            postdeploy.sh, new-copilot-secret.sh, new-copilot-studio-secret.sh,
+                                    test-obo.py, cleanup.sh
 docs/                               architecture.md + diagrams/ (Excalidraw sources, SVG, PNG)
 ```

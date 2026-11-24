@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deletes what the Bicep deployment created: the resource group and the three app registrations.
+# Deletes what the Bicep deployment created: the resource group and the app registrations.
 # Apps are deleted permanently so their uniqueName can be redeployed. Bicep deployments never delete
 # Entra objects on their own. The AI Gateway Dataplane service principal is intentionally kept.
 set -euo pipefail
@@ -13,6 +13,7 @@ output() {
 RG="$(output resourceGroupName.value)"
 APPS=(
   "$(output copilotConnector.value.clientId)"
+  "$(output copilotStudio.value.clientId 2>/dev/null || true)"
   "$(output tokenExchangeAppClientId.value)"
   "$(output backendAppClientId.value)"
 )
@@ -38,4 +39,4 @@ done
 echo "Deleting resource group $RG ..."
 az group delete --name "$RG" --yes
 az deployment sub delete --name "$DEPLOYMENT_NAME"
-echo "Done. Also remove the Teams Developer Portal OAuth registration and the M365 connector."
+echo "Done. Also remove the Teams Developer Portal OAuth registration, the M365 connector, and the Copilot Studio MCP tool."

@@ -38,3 +38,13 @@ echo
 echo "Copilot connector (Teams Developer Portal → OAuth client registration):"
 az deployment sub show --name "$DEPLOYMENT_NAME" --query "properties.outputs.copilotConnector.value" -o yaml
 echo "Create the client secret with: scripts/new-copilot-secret.sh"
+
+STUDIO_CLIENT_ID="$(az deployment sub show --name "$DEPLOYMENT_NAME" \
+  --query "properties.outputs.copilotStudio.value.clientId" -o tsv 2>/dev/null || true)"
+if [[ -n "$STUDIO_CLIENT_ID" ]]; then
+  echo
+  echo "Copilot Studio (Tools → Add a tool → Model Context Protocol → OAuth 2.0 → Manual):"
+  az deployment sub show --name "$DEPLOYMENT_NAME" --query "properties.outputs.copilotStudio.value" -o yaml
+  echo "Create the client secret with: scripts/new-copilot-studio-secret.sh"
+  echo "After saving the tool, add its Redirect URL to copilotStudioRedirectUris and redeploy."
+fi

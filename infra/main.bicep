@@ -59,6 +59,12 @@ param enableEasyAuth bool = true
 @description('Create the Entra client app used by the Microsoft 365 Copilot / Copilot Cowork federated connector.')
 param enableCopilotConnector bool = true
 
+@description('Create the Entra client app used by a Copilot Studio agent (MCP tool, OAuth 2.0 Manual).')
+param enableCopilotStudioClient bool = true
+
+@description('Redirect URLs that Copilot Studio generates when you save the MCP tool. Add each one and redeploy.')
+param copilotStudioRedirectUris array = []
+
 @description('Assign "AI Gateway Tools User" on the MCP server to the identity running the deployment.')
 param grantRuntimeAccessToDeployer bool = true
 
@@ -99,6 +105,8 @@ module entra 'modules/entra.bicep' = {
     gatewayIdentityPrincipalId: identities.outputs.gatewayPrincipalId
     backendScopeName: backendScopeName
     enableCopilotConnector: enableCopilotConnector
+    enableCopilotStudioClient: enableCopilotStudioClient
+    copilotStudioRedirectUris: copilotStudioRedirectUris
     ownerObjectId: deployerObjectId
   }
 }
@@ -171,5 +179,18 @@ output copilotConnector object = enableCopilotConnector
       restrictUsageByOrg: 'My organization only'
       restrictUsageByApp: 'Any Teams app'
       redirectUri: entra.outputs.copilotConnectorRedirectUri
+    }
+  : {}
+@description('Values for the Copilot Studio MCP tool (Tools → Add a tool → Model Context Protocol → OAuth 2.0 → Manual).')
+output copilotStudio object = enableCopilotStudioClient
+  ? {
+      clientId: entra.outputs.copilotStudioAppId
+      clientSecret: 'run scripts/new-copilot-studio-secret.sh'
+      serverUrl: aiGateway.outputs.mcpEndpointUrl
+      authorizationUrl: '${authority}/oauth2/v2.0/authorize'
+      tokenUrlTemplate: '${authority}/oauth2/v2.0/token'
+      refreshUrl: '${authority}/oauth2/v2.0/token'
+      scopes: 'https://ai.gateway.azure.com/Data.All offline_access'
+      redirectUris: copilotStudioRedirectUris
     }
   : {}
